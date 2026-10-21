@@ -2,7 +2,7 @@
   "name": "darwin-gp",
   "version": "1.0.0",
   "private": true,
-  "description": "Darwin GP : des voitures pilotées par réseaux de neurones apprennent à courir par algorithme génétique (p5.js, steering de Reynolds).",
+  "description": "Course de monoplaces en p5.js avec des pilotes IA réactifs (steering behaviors de Craig Reynolds).",
   "scripts": {
     "test": "node --test tests/"
   },

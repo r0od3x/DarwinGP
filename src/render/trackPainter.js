@@ -106,8 +106,16 @@ const TrackPainter = (() => {
     g.restore();
   }
 
+  // Vrai si le point est à au moins minDist px de toute la ligne médiane : un rail ne doit pas
+  // traverser le dégagement d'une autre portion du circuit (épingles, portions voisines).
+  function clearOfTrack(track, p, minDist) {
+    const d2 = minDist * minDist;
+    return track.points.every(q => (q.x - p.x) ** 2 + (q.y - p.y) ** 2 >= d2);
+  }
+
+  const MIN_RAIL_POINTS = 40;
+
   function guardRails(g, track, ranges) {
-    const half = track.width / 2;
     const inCorner = new Array(track.n).fill(false);
     for (const r of ranges) for (let i = r.from; i < r.to; i++) inCorner[(i + track.n) % track.n] = true;
     g.save();
@@ -121,10 +129,15 @@ const TrackPainter = (() => {
         // Bac à gravier de ce côté, ou intérieur d'un virage trop serré (le rail se replierait).
         const folds = Math.sign(track.curvature[k]) === side && Math.abs(track.curvature[k]) * dist > 0.45;
         const corner = (inCorner[k] && -Math.sign(track.curvature[k]) === side) || folds;
-        if (!corner) run.push(offsetPoints(track, side * (track.width / 2 + track.runoff + 8), k, k + 1)[0]);
-        if ((corner || i === track.n) && run.length > 1) {
-          polyline(g, run, false);
-          g.stroke();
+        const p = corner ? null : offsetPoints(track, side * dist, k, k + 1)[0];
+        const blocked = !p || !clearOfTrack(track, p, dist - 4);
+        if (!blocked) run.push(p);
+        if (blocked || i === track.n) {
+          // Les petits morceaux isolés (entre deux portions de circuit) ne sont pas dessinés.
+          if (run.length >= MIN_RAIL_POINTS) {
+            polyline(g, run, false);
+            g.stroke();
+          }
           run = [];
         }
       }
@@ -355,5 +368,12 @@ const TrackPainter = (() => {
     g.restore();
   }
 
-  return { seeded, corners, offsetPoints, bake, addSkids };
+  // Herbe autour de l'image précalculée (quand la caméra voit au-delà).
+  let surround = null;
+  function surroundPattern(g) {
+    surround ??= noiseTile(256, ['#2f6420', '#4f8f35', '#5b9c3c', '#356f25'], 2600, 5);
+    return g.createPattern(surround, 'repeat');
+  }
+
+  return { seeded, corners, offsetPoints, clearOfTrack, bake, addSkids, surroundPattern };
 })();

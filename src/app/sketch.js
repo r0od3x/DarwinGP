@@ -1,439 +1,469 @@
-// Boucle p5 : curseurs de réglage, entraînement (Trainer), dessin du circuit entier, du réseau,
-// de la courbe d'apprentissage, et sauvegarde / chargement.
-// Circuit d'origine, affiché avant l'entraînement et couru par la première génération.
-const home = TrackGenerator.circuit(null);
-const settings = Trainer.initialSettings();
-let trainer = null;
-let running = false;
-let randomTracks = true;
-// Décor du circuit dessiné une fois par circuit (celui d'origine est gardé).
-const bakedCache = new Map();
-let previewBrain = null;
-let simSpeed = 1;
-let allRays = false;
-let chartGeneration = -1;
-// Temps de calcul maximal par image (ms) : la page reste fluide même à vitesse ×30.
-const STEP_BUDGET_MS = 28;
-const UNITS = { spread: v => `${v}°`, rayLength: v => `${v} px`, generationTime: v => `${v} s` };
-const $ = id => document.getElementById(id);
+// Boucle p5 : simulation (Race), caméra, dessin du monde et de l'interface.
+let race = null;
+let baked = null;
+let grassPattern = null;
+let followed = null;
+let debug = false;
+let paused = true;
+const camera = { x: 0, y: 0, zoom: 1, mode: 0 };
+// Caméras : proche (suit la voiture), large, tout le circuit.
+const CAMERAS = [{ name: 'proche', zoom: 1.45 }, { name: 'large', zoom: 0.75 }, { name: 'circuit', zoom: null }];
+const choices = { mode: 'course', laps: 3, ai: 9, neural: [] };
+// Au moins MIN_STEERING adversaires gardent le pilotage par steering behaviors.
+const MIN_STEERING = 2;
+let smokeSprite = null;
+let dirtSprite = null;
+let lastFeedFrame = -1;
+// Son du moteur de la voiture suivie (activé au menu ou avec M).
+const engine = EngineSound.create();
 
 function setup() {
-  const stage = $('stage');
-  createCanvas(stage.clientWidth, stage.clientHeight).parent('stage');
-  bindSettings();
-  bindControls();
-  refreshArchitecture();
-  refreshControls();
-  drawChart();
+  const canvas = createCanvas(windowWidth, windowHeight);
+  canvas.parent('stage');
+  smokeSprite = puffSprite('230, 230, 230');
+  dirtSprite = puffSprite('170, 145, 95');
+  document.getElementById('start').addEventListener('click', startFromMenu);
+  buildNeuralChoices();
+  document.getElementById('again').addEventListener('click', () => {
+    document.getElementById('results').hidden = true;
+    newRace();
+  });
+  document.getElementById('tower-list').addEventListener('click', event => {
+    const row = event.target.closest('li');
+    if (row && race) followed = race.cars[Number(row.dataset.car)];
+  });
+  newRace();
+}
+
+function puffSprite(rgb) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, `rgba(${rgb}, 0.9)`);
+  grad.addColorStop(0.6, `rgba(${rgb}, 0.35)`);
+  grad.addColorStop(1, `rgba(${rgb}, 0)`);
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  return c;
+}
+
+// Code de 3 ou 4 lettres (classement, étiquettes) et couleur du mode de décision.
+function codeOf(car) {
+  return car.team.code ?? car.team.driver.slice(0, 3).toUpperCase();
+}
+
+function modeColor(car) {
+  if (car.isPlayer) return '#ffd600';
+  return (car.isNeural ? NeuralRaceCar.MODES[car.mode] : AICar.MODES[car.mode]) ?? '#ffffff';
+}
+
+// Menu : une case par génération disponible (neuralBrains.js).
+function buildNeuralChoices() {
+  const list = document.getElementById('neural-list');
+  if (!list || typeof NeuralBrains === 'undefined') return;
+  list.replaceChildren(...NeuralBrains.map((spec, i) => {
+    const label = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.name = 'neural';
+    input.value = String(i);
+    input.checked = spec.selected !== false;
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = spec.color ?? Race.NEURAL_COLORS[i % Race.NEURAL_COLORS.length];
+    label.append(input, swatch, ` ${spec.label ?? `Génération ${spec.generation}`}`);
+    return label;
+  }));
+}
+
+// Générations cochées, au plus (adversaires - MIN_STEERING), réparties sur la liste.
+function chosenNeural(aiCount) {
+  const checked = [...document.querySelectorAll('input[name="neural"]:checked')].map(i => NeuralBrains[Number(i.value)]);
+  const room = Math.max(0, aiCount - MIN_STEERING);
+  if (checked.length <= room) return checked;
+  return Array.from({ length: room }, (_, k) => checked[Math.floor(k * checked.length / room)]);
+}
+
+function startFromMenu() {
+  for (const name of ['mode', 'laps', 'ai']) {
+    const value = document.querySelector(`input[name="${name}"]:checked`).value;
+    choices[name] = name === 'mode' ? value : Number(value);
+  }
+  choices.neural = chosenNeural(choices.ai);
+  document.getElementById('menu').hidden = true;
+  engine.setEnabled(document.getElementById('sound').checked);
+  newRace();
+  paused = false;
+}
+
+function newRace() {
+  race = Race.create({ laps: choices.laps, aiCount: choices.ai, player: choices.mode === 'course', neural: choices.neural });
+  const slots = race.cars.map((_, i) => Race.gridSlot(race.track, i));
+  if (!baked) baked = TrackPainter.bake(race.track, slots);
+  else baked.skids.getContext('2d').clearRect(0, 0, baked.skids.width, baked.skids.height);
+  followed = race.player ?? race.cars[0];
+  camera.x = followed.pos.x;
+  camera.y = followed.pos.y;
+  lastFeedFrame = -1;
+  document.getElementById('results').hidden = true;
 }
 
 // ---------- Boucle ----------
 function draw() {
-  if (trainer && running) {
-    if (Trainer.backstage(trainer)) {
-      Trainer.runBackstage(trainer);
-    } else {
-      const start = performance.now();
-      for (let i = 0; i < simSpeed && performance.now() - start < STEP_BUDGET_MS; i++) Trainer.step(trainer);
-    }
+  if (!paused) {
+    if (race.player) readKeys(race.player);
+    Race.step(race);
+    TrackPainter.addSkids(baked, race.skids);
+    if (race.phase === 'finished' && document.getElementById('results').hidden) showResults();
   }
+  updateCamera();
   render();
-  if (frameCount % 6 === 0) updateStats();
-  if (frameCount % 10 === 0) drawNetwork();
-  if (trainer && trainer.history.length !== chartGeneration) drawChart();
+  const gearbox = Gearbox.state(followed.localVelocity().along, followed.topSpeed);
+  engine.update(paused ? Gearbox.IDLE : gearbox.rpm, paused ? 0 : followed.throttle);
+  if (frameCount % 4 === 0) updateHud(gearbox);
 }
 
-// ---------- Vue : tout le circuit ----------
-function circuit() {
-  return trainer ? trainer.circuit : home;
+function readKeys(car) {
+  car.keys.up = keyIsDown(UP_ARROW) || keyIsDown(90) || keyIsDown(87);
+  car.keys.down = keyIsDown(DOWN_ARROW) || keyIsDown(83);
+  car.keys.left = keyIsDown(LEFT_ARROW) || keyIsDown(81) || keyIsDown(65);
+  car.keys.right = keyIsDown(RIGHT_ARROW) || keyIsDown(68);
 }
 
-// Le décor n'est redessiné qu'à l'affichage : en accéléré, les circuits sautés ne coûtent rien.
-function bakedFor(c) {
-  if (!bakedCache.has(c)) {
-    for (const key of bakedCache.keys()) if (key !== home) bakedCache.delete(key);
-    bakedCache.set(c, TrackPainter.bake(c.track, []));
+function updateCamera() {
+  const setting = CAMERAS[camera.mode];
+  const b = race.track.bounds;
+  let zoom;
+  let tx;
+  let ty;
+  if (setting.zoom === null) {
+    zoom = Math.min(width / b.w, height / b.h) * 1.15;
+    tx = b.x + b.w / 2;
+    ty = b.y + b.h / 2;
+  } else {
+    zoom = setting.zoom;
+    // La caméra regarde un peu devant la voiture, d'autant plus qu'elle va vite.
+    tx = followed.pos.x + followed.vel.x * 22;
+    ty = followed.pos.y + followed.vel.y * 22;
   }
-  return bakedCache.get(c);
+  camera.x += (tx - camera.x) * 0.08;
+  camera.y += (ty - camera.y) * 0.08;
+  camera.zoom += (zoom - camera.zoom) * 0.06;
 }
 
-function view(track) {
-  // Les bornes du circuit ont une grande marge (décor) : on en garde une partie seulement.
-  const b = track.bounds;
-  const crop = 200;
-  const w = b.w - crop * 2;
-  const h = b.h - crop * 2;
-  return { x: b.x + b.w / 2, y: b.y + b.h / 2, zoom: Math.min(width / w, height / h) };
-}
-
+// ---------- Dessin du monde ----------
 function render() {
   const ctx = drawingContext;
-  const c = circuit();
-  const baked = bakedFor(c);
-  const v = view(c.track);
   ctx.save();
   ctx.fillStyle = '#2f5d22';
   ctx.fillRect(0, 0, width, height);
   ctx.translate(width / 2, height / 2);
-  ctx.scale(v.zoom, v.zoom);
-  ctx.translate(-v.x, -v.y);
+  ctx.scale(camera.zoom, camera.zoom);
+  ctx.translate(-camera.x, -camera.y);
+  // Au-delà de l'image du circuit : la même herbe, sans bande de tonte.
+  const view = { x: camera.x - width / 2 / camera.zoom, y: camera.y - height / 2 / camera.zoom, w: width / camera.zoom, h: height / camera.zoom };
+  ctx.fillStyle = '#3d7a2a';
+  ctx.fillRect(view.x, view.y, view.w, view.h);
+  ctx.fillStyle = grassPattern ??= TrackPainter.surroundPattern(ctx);
+  ctx.fillRect(view.x, view.y, view.w, view.h);
   ctx.drawImage(baked.canvas, baked.origin.x, baked.origin.y);
-  // Génération 1 jouée en coulisses : on montre le circuit vide.
-  if (trainer && !Trainer.backstage(trainer)) {
-    const lead = Trainer.leader(trainer);
-    for (const car of trainer.cars) {
-      if (!car.alive) continue;
-      if (allRays && car !== lead) drawRays(ctx, car.pos, car.rays, v.zoom, 0.35);
-      drawCar(ctx, car, v.zoom);
-    }
-    if (lead) {
-      drawRays(ctx, lead.pos, lead.rays, v.zoom, 1);
-      ring(ctx, lead.pos, v.zoom);
-    }
-  } else if (!trainer) {
-    drawPreview(ctx, v.zoom);
+  ctx.drawImage(baked.skids, baked.origin.x, baked.origin.y);
+  if (debug) drawProfile(ctx, followed);
+  for (const puff of race.smoke) if (puff.dirt) puff.show(ctx, dirtSprite);
+  for (const car of race.cars) car.show(ctx);
+  for (const puff of race.smoke) if (!puff.dirt) puff.show(ctx, smokeSprite);
+  if (debug) for (const car of race.cars) if (car instanceof AICar) drawDebug(ctx, car);
+  if (debug) for (const car of race.cars) if (car.isNeural) drawNeuralDebug(ctx, car);
+  if (camera.zoom > 0.55) drawNames(ctx);
+  ctx.restore();
+  drawMinimap(ctx);
+  const v = ctx.createRadialGradient(width / 2, height / 2, Math.min(width, height) * 0.35, width / 2, height / 2, Math.max(width, height) * 0.75);
+  v.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  v.addColorStop(1, 'rgba(0, 0, 0, 0.35)');
+  ctx.fillStyle = v;
+  ctx.fillRect(0, 0, width, height);
+}
+
+function drawNames(ctx) {
+  ctx.save();
+  ctx.font = '700 9px "Segoe UI", system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  for (const car of race.cars) {
+    const code = codeOf(car);
+    const x = car.pos.x;
+    const y = car.pos.y - 22;
+    const half = code.length > 3 ? 18 : 15;
+    ctx.fillStyle = 'rgba(10, 12, 16, 0.7)';
+    ctx.beginPath();
+    ctx.roundRect(x - half, y - 9, half * 2, 12, 3);
+    ctx.fill();
+    ctx.fillStyle = car.team.colors[0];
+    ctx.fillRect(x - half, y - 9, 3, 12);
+    ctx.fillStyle = car.isPlayer ? '#ffd600' : '#ffffff';
+    ctx.fillText(code, x + 1, y);
   }
   ctx.restore();
-  drawBanner(ctx);
 }
 
-// Avant l'entraînement : une voiture sur la ligne de départ montre les rayons réglés.
-function drawPreview(ctx, zoom) {
-  const pose = Trainer.startPose(home.track);
-  const rays = TrackSensors.read(home.sensors, pose, pose.angle, Trainer.rayAngles(settings), settings.rayLength);
-  drawRays(ctx, pose, rays, zoom, 1);
-  drawCar(ctx, {
-    pos: pose, angle: pose.angle, length: 34, width: 15, throttle: 0, drafting: false, vel: { mag: () => 0 },
-    team: { colors: NeuralCar.COLORS.elite, number: '' },
-  }, zoom);
-  ring(ctx, pose, zoom);
-}
-
-// Vue de loin : les voitures sont dessinées un peu plus grandes pour rester visibles
-// (dessin seulement, la simulation garde leur vraie taille).
-function drawCar(ctx, car, zoom) {
-  const k = Math.min(1.8, Math.max(1, 0.6 / zoom));
+// Debug : vitesse cible le long de la voie devant la voiture suivie (vert = vite, rouge = freinage).
+function drawProfile(ctx, car) {
+  if (!(car instanceof AICar) || !car.profile) return;
   ctx.save();
-  ctx.translate(car.pos.x, car.pos.y);
-  ctx.scale(k, k);
-  ctx.translate(-car.pos.x, -car.pos.y);
-  CarPainter.draw(ctx, car);
+  for (let d = 0; d < 1600; d += 16) {
+    const s = car.s + d;
+    const v = Track.sample(race.track, car.profile, s);
+    const p = Track.pointAt(race.track, s, Track.sample(race.track, race.track.offsets, s) + car.lane * Race.LANE_STEP);
+    ctx.fillStyle = `hsl(${Math.min(1, v / car.topSpeed) * 120}, 90%, 50%)`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
 }
 
-// Rayon : vert s'il ne touche rien, de l'orange au rouge quand le bord est proche.
-function drawRays(ctx, origin, rays, zoom, alpha) {
-  if (!rays.length) return;
+// Debug : point visé sur la voie, trois points de détection, dangers, steering et décision.
+function drawDebug(ctx, car) {
+  const color = AICar.MODES[car.mode] ?? '#ffffff';
   ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.lineWidth = 1.6 / zoom;
-  for (const ray of rays) {
-    const closeness = 1 - ray.distance / settings.rayLength;
-    const hit = closeness > 1e-6;
-    ctx.strokeStyle = hit ? `hsl(${Math.round(45 * (1 - closeness))}, 100%, 55%)` : 'rgba(140, 255, 160, 0.85)';
+  if (car.followInfo) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 4]);
     ctx.beginPath();
-    ctx.moveTo(origin.x, origin.y);
+    ctx.moveTo(car.pos.x, car.pos.y);
+    ctx.lineTo(car.followInfo.target.x, car.followInfo.target.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(car.followInfo.target.x, car.followInfo.target.y, 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  if (car.avoidInfo) {
+    car.avoidInfo.points.forEach((p, i) => {
+      ctx.fillStyle = car.avoidInfo.point === p ? '#ff5252' : ['#ffe14d', '#ffb347', '#ff8a3d'][i];
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 2.6, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+  for (const h of car.hazards) {
+    ctx.strokeStyle = '#ff5252';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(h.pos.x, h.pos.y, h.r + 6, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  if (car.steering && car.steering.mag() > 1e-4) {
+    const k = 120;
+    ctx.strokeStyle = '#ffe14d';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(car.pos.x, car.pos.y);
+    ctx.lineTo(car.pos.x + car.steering.x * k, car.pos.y + car.steering.y * k);
+    ctx.stroke();
+  }
+  // Étiquette : décision, vitesse actuelle / visée, frein.
+  ctx.font = '700 8px "Segoe UI", system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = color;
+  ctx.fillText(car.mode, car.pos.x, car.pos.y + 26);
+  ctx.fillStyle = car.throttle < 0 ? '#ff5252' : '#c6f36b';
+  ctx.fillText(`${car.speedKmh()} → ${Math.round(car.targetSpeed * RaceCar.KMH)} km/h`, car.pos.x, car.pos.y + 35);
+  ctx.restore();
+}
+
+// Debug d'un pilote génétique : ses rayons (vert = loin du bord, rouge = proche), le cap voulu
+// par le réseau, sa génération, sa décision et ses deux sorties (virage, vitesse).
+function drawNeuralDebug(ctx, car) {
+  ctx.save();
+  ctx.lineWidth = 1.2;
+  for (const ray of car.rays) {
+    const t = Math.min(1, ray.distance / car.rayLength);
+    ctx.strokeStyle = `hsla(${t * 120}, 90%, 55%, 0.85)`;
+    ctx.beginPath();
+    ctx.moveTo(car.pos.x, car.pos.y);
     ctx.lineTo(ray.x, ray.y);
     ctx.stroke();
     ctx.fillStyle = ctx.strokeStyle;
     ctx.beginPath();
-    ctx.arc(ray.x, ray.y, (hit ? 3.5 : 2.5) / zoom, 0, Math.PI * 2);
-    if (hit) ctx.fill();
-    else ctx.stroke();
+    ctx.arc(ray.x, ray.y, 2.5, 0, Math.PI * 2);
+    ctx.fill();
   }
-  ctx.restore();
-}
-
-function ring(ctx, pos, zoom) {
-  ctx.save();
-  ctx.strokeStyle = '#ffd600';
-  ctx.lineWidth = 2.5 / zoom;
+  ctx.strokeStyle = '#e040fb';
+  ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.arc(pos.x, pos.y, 14 / zoom + 10, 0, Math.PI * 2);
+  ctx.moveTo(car.pos.x, car.pos.y);
+  ctx.lineTo(car.pos.x + Math.cos(car.desiredHeading) * 60, car.pos.y + Math.sin(car.desiredHeading) * 60);
   ctx.stroke();
+  ctx.font = '700 8px "Segoe UI", system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = modeColor(car);
+  ctx.fillText(`${codeOf(car)} · ${car.mode}`, car.pos.x, car.pos.y + 26);
+  ctx.fillStyle = '#e1bee7';
+  ctx.fillText(`virage ${car.outputs[0].toFixed(2)} · vitesse ${car.outputs[1].toFixed(2)} → ${Math.round(car.targetSpeed * RaceCar.KMH)} km/h`, car.pos.x, car.pos.y + 35);
   ctx.restore();
 }
 
-function drawBanner(ctx) {
-  const text = !trainer ? 'Réglez les curseurs, puis démarrez l\'entraînement'
-    : Trainer.backstage(trainer)
-      ? `Génération 1 en coulisses (cerveaux au hasard)… ${Math.round(100 * trainer.frame / (settings.generationTime * Trainer.FRAMES_PER_SECOND))} %`
-    : `${trainer.championOnly ? 'Champion seul' : `Génération ${trainer.generation}`} · ${trainer.circuit.name}${running ? '' : ' · arrêté'}`;
+let minimapPath = null;
+function drawMinimap(ctx) {
+  const t = race.track;
+  const b = t.bounds;
+  const w = 230;
+  const h = w * b.h / b.w;
+  const x0 = width - w - 18;
+  const y0 = height - h - 40;
+  const sx = w / b.w;
   ctx.save();
-  ctx.font = '700 18px "Segoe UI", system-ui, sans-serif';
-  const w = ctx.measureText(text).width + 28;
-  ctx.fillStyle = 'rgba(10, 12, 16, 0.72)';
+  ctx.fillStyle = 'rgba(10, 12, 16, 0.65)';
   ctx.beginPath();
-  ctx.roundRect(16, 16, w, 38, 8);
+  ctx.roundRect(x0 - 8, y0 - 8, w + 16, h + 16, 10);
   ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText(text, 30, 41);
+  ctx.translate(x0, y0);
+  ctx.scale(sx, sx);
+  ctx.translate(-b.x, -b.y);
+  if (!minimapPath) {
+    minimapPath = new Path2D();
+    t.points.forEach((p, i) => (i ? minimapPath.lineTo(p.x, p.y) : minimapPath.moveTo(p.x, p.y)));
+    minimapPath.closePath();
+  }
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+  ctx.lineWidth = 3 / sx;
+  ctx.stroke(minimapPath);
+  for (const car of race.cars) {
+    ctx.fillStyle = car.team.colors[0];
+    ctx.strokeStyle = car === followed ? '#ffd600' : '#000000';
+    ctx.lineWidth = (car === followed ? 3 : 1.5) / sx;
+    ctx.beginPath();
+    ctx.arc(car.pos.x, car.pos.y, (car === followed ? 6 : 4.5) / sx, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
-// ---------- Panneau : réseau et courbe ----------
-// Schéma du réseau : une colonne par couche. Pendant l'entraînement, les poids et les activations
-// sont ceux de la voiture en tête (jaune = positif, bleu = négatif, épaisseur = force).
-function drawNetwork() {
-  const canvas = $('network');
-  const g = canvas.getContext('2d');
-  const lead = trainer && Trainer.leader(trainer);
-  const brain = lead ? lead.brain : previewBrain;
-  const sizes = brain.sizes;
-  const values = lead && lead.inputs.length ? brain.layers(lead.inputs) : null;
-  const W = canvas.width;
-  const H = canvas.height;
-  const padX = 110;
-  const padY = 22;
-  const col = l => padX + (W - padX * 2) * l / (sizes.length - 1);
-  const rowY = (l, i) => sizes[l] === 1 ? H / 2 : padY + (H - padY * 2) * i / (sizes[l] - 1);
-  g.clearRect(0, 0, W, H);
-  for (let l = 0; l < sizes.length - 1; l++) {
-    const w = brain.weights[l];
-    for (let j = 0; j < sizes[l + 1]; j++) {
-      for (let i = 0; i < sizes[l]; i++) {
-        const weight = w[j * sizes[l] + i];
-        g.strokeStyle = weight > 0 ? 'rgba(255, 214, 0, ' : 'rgba(79, 195, 247, ';
-        g.strokeStyle += `${Math.min(0.8, Math.abs(weight) * 0.35 + 0.05)})`;
-        g.lineWidth = Math.min(3, Math.abs(weight) * 1.2 + 0.3);
-        g.beginPath();
-        g.moveTo(col(l), rowY(l, i));
-        g.lineTo(col(l + 1), rowY(l + 1, j));
-        g.stroke();
-      }
-    }
-  }
-  const radius = Math.max(4, Math.min(11, (H - padY * 2) / Math.max(...sizes) / 2.6));
-  g.font = '600 22px "Segoe UI", system-ui, sans-serif';
-  g.textBaseline = 'middle';
-  sizes.forEach((count, l) => {
-    for (let i = 0; i < count; i++) {
-      const a = values ? values[l][i] : 0;
-      g.fillStyle = a >= 0 ? `rgba(255, 214, 0, ${0.25 + 0.75 * Math.min(1, a)})` : `rgba(79, 195, 247, ${0.25 + 0.75 * Math.min(1, -a)})`;
-      g.strokeStyle = '#0f1318';
-      g.lineWidth = 2;
-      g.beginPath();
-      g.arc(col(l), rowY(l, i), radius, 0, Math.PI * 2);
-      g.fill();
-      g.stroke();
-    }
-  });
-  g.fillStyle = 'rgba(244, 246, 248, 0.75)';
-  g.textAlign = 'right';
-  const inputs = sizes[0];
-  if (inputs <= 9) {
-    for (let i = 0; i < inputs; i++) g.fillText(i === inputs - 1 ? 'vitesse' : `rayon ${i + 1}`, col(0) - radius - 6, rowY(0, i));
-  } else {
-    g.fillText(`${inputs - 1} rayons`, col(0) - radius - 6, H / 2 - 12);
-    g.fillText('+ vitesse', col(0) - radius - 6, H / 2 + 12);
-  }
-  g.textAlign = 'left';
-  const last = sizes.length - 1;
-  ['virage', 'vitesse'].forEach((label, i) => g.fillText(label, col(last) + radius + 6, rowY(last, i)));
+// ---------- Interface ----------
+function formatTime(seconds) {
+  if (seconds === null || seconds === undefined) return '—';
+  const m = Math.floor(seconds / 60);
+  const s = seconds - m * 60;
+  return m ? `${m}:${s.toFixed(2).padStart(5, '0')}` : s.toFixed(2);
 }
 
-// Courbe d'apprentissage : meilleure voiture et moyenne de chaque génération, en tours.
-function drawChart() {
-  const canvas = $('chart');
-  const g = canvas.getContext('2d');
-  const W = canvas.width;
-  const H = canvas.height;
-  const history = trainer ? trainer.history : [];
-  chartGeneration = history.length;
-  g.clearRect(0, 0, W, H);
-  g.font = '600 18px "Segoe UI", system-ui, sans-serif';
-  g.fillStyle = 'rgba(244, 246, 248, 0.6)';
-  if (!history.length) {
-    g.textAlign = 'center';
-    g.fillText('La courbe apparaît après la première génération', W / 2, H / 2);
-    return;
-  }
-  // Chaque génération en tours de son propre circuit.
-  const laps = history.map(h => ({ best: h.laps, mean: h.meanLaps, test: h.test }));
-  const top = Math.max(1, ...laps.map(p => p.best)) * 1.1;
-  const left = 46;
-  const bottom = H - 30;
-  const x = i => left + (W - left - 12) * (laps.length === 1 ? 0.5 : i / (laps.length - 1));
-  const y = v => bottom - (bottom - 12) * v / top;
-  g.strokeStyle = 'rgba(255, 255, 255, 0.12)';
-  g.lineWidth = 1;
-  g.textAlign = 'right';
-  g.textBaseline = 'middle';
-  for (let t = 0; t <= top; t += top > 4 ? 1 : 0.5) {
-    g.beginPath();
-    g.moveTo(left, y(t));
-    g.lineTo(W - 12, y(t));
-    g.stroke();
-    g.fillText(String(t), left - 8, y(t));
-  }
-  g.textAlign = 'left';
-  g.fillText(`gén. ${history[0].generation}`, left, H - 12);
-  g.textAlign = 'right';
-  g.fillText(`gén. ${history[history.length - 1].generation}`, W - 12, H - 12);
-  for (const [key, color] of [['mean', '#4fc3f7'], ['test', '#69f0ae'], ['best', '#ffd600']]) {
-    g.strokeStyle = color;
-    g.lineWidth = 3;
-    g.beginPath();
-    let started = false;
-    laps.forEach((p, i) => {
-      // Anciennes sauvegardes : pas de score de test, la courbe commence plus tard.
-      if (!Number.isFinite(p[key])) return;
-      if (started) g.lineTo(x(i), y(p[key]));
-      else g.moveTo(x(i), y(p[key]));
-      started = true;
+function updateHud(gearbox = Gearbox.state(followed.vel.mag(), followed.topSpeed)) {
+  const order = Race.standings(race);
+  const leader = order[0];
+  const L = race.track.length;
+  const elapsed = race.startFrame === null ? 0 : race.frame - race.startFrame;
+  const pace = elapsed > 0 ? Math.max(1, (leader.progress + L) / elapsed) : 6;
+  document.getElementById('tower-list').replaceChildren(...order.map((car, i) => {
+    const li = document.createElement('li');
+    li.dataset.car = String(race.cars.indexOf(car));
+    if (car === followed) li.classList.add('followed');
+    if (car.isPlayer) li.classList.add('player');
+    let gap = '';
+    if (i === 0) gap = race.phase === 'race' ? `T${Math.max(1, Math.min(race.laps, car.lap))}` : '';
+    else if (car.finished && leader.finished) gap = `+${((car.finishFrame - leader.finishFrame) / 60).toFixed(1)}`;
+    else {
+      const lapsDown = Math.floor((leader.progress - car.progress) / L);
+      gap = lapsDown >= 1 ? `+${lapsDown} T` : `+${((leader.progress - car.progress) / pace / 60).toFixed(1)}`;
+    }
+    const cells = [
+      ['pos', String(i + 1)], ['team', ''], ['code', codeOf(car)], ['gap', gap], ['mode', ''],
+    ].map(([cls, text]) => {
+      const span = document.createElement('span');
+      span.className = cls;
+      span.textContent = text;
+      if (cls === 'team') span.style.background = car.team.colors[0];
+      if (cls === 'mode') span.style.background = modeColor(car);
+      return span;
     });
-    g.stroke();
-    if (laps.length === 1 && Number.isFinite(laps[0][key])) {
-      g.fillStyle = color;
-      g.beginPath();
-      g.arc(x(0), y(laps[0][key]), 4, 0, Math.PI * 2);
-      g.fill();
+    li.append(...cells);
+    return li;
+  }));
+  const car = followed;
+  const lap = Math.max(1, Math.min(race.laps, car.lap || 1));
+  document.getElementById('lap').textContent = car.finished ? 'Arrivée' : `${lap} / ${race.laps}`;
+  document.getElementById('lap-time').textContent = race.phase === 'grid' ? '0.00' : formatTime((race.frame - (car.lapStart ?? race.frame)) / 60);
+  document.getElementById('best-lap').textContent = formatTime(car.bestLap);
+  document.getElementById('race-best').textContent = race.bestLap ? `${formatTime(race.bestLap.time)} ${race.bestLap.code ?? race.bestLap.driver.slice(0, 3).toUpperCase()}` : '—';
+  document.getElementById('dash-driver').textContent = `P${order.indexOf(car) + 1} · ${car.team.driver} · ${car.team.name}`;
+  document.getElementById('speed').textContent = car.speedKmh();
+  document.getElementById('gear').textContent = gearbox.gear ? String(gearbox.gear) : 'N';
+  const rpm = Gearbox.rpmRatio(gearbox.rpm);
+  const rpmBar = document.getElementById('rpm-bar');
+  rpmBar.style.width = `${rpm * 100}%`;
+  rpmBar.classList.toggle('shift', rpm > 0.92);
+  document.getElementById('throttle-bar').style.width = `${Math.max(0, car.throttle) * 100}%`;
+  document.getElementById('brake-bar').style.width = `${Math.max(0, -car.throttle) * 100}%`;
+  const mode = car.isPlayer ? (car.drafting ? 'aspiration' : '') : car.mode;
+  const modeEl = document.getElementById('dash-mode');
+  modeEl.textContent = mode;
+  modeEl.style.color = car.isPlayer ? (AICar.MODES[mode] ?? '#ffffff') : modeColor(car);
+  // Feux de départ.
+  const lights = document.getElementById('lights');
+  lights.hidden = race.phase !== 'grid';
+  [...lights.children].forEach((el, i) => el.classList.toggle('on', i < race.lightsOn));
+  // Fil des événements (5 dernières secondes).
+  const recent = race.feed.filter(e => race.frame - e.frame < 300);
+  const key = recent.length ? recent[recent.length - 1].frame : -1;
+  if (key !== lastFeedFrame) {
+    lastFeedFrame = key;
+    document.getElementById('feed').replaceChildren(...recent.slice(-3).map(e => {
+      const li = document.createElement('li');
+      li.textContent = e.text;
+      return li;
+    }));
+  } else if (!recent.length) {
+    document.getElementById('feed').replaceChildren();
+  }
+}
+
+function showResults() {
+  const order = Race.standings(race);
+  const winner = order[0];
+  document.getElementById('results-body').replaceChildren(...order.map((car, i) => {
+    const tr = document.createElement('tr');
+    if (car.isPlayer) tr.className = 'player';
+    const time = car.finished
+      ? (i === 0 ? formatTime((car.finishFrame - race.startFrame) / 60) : `+${((car.finishFrame - winner.finishFrame) / 60).toFixed(2)} s`)
+      : 'non classé';
+    for (const text of [String(i + 1), car.team.driver, car.team.name, time, formatTime(car.bestLap)]) {
+      const td = document.createElement('td');
+      td.textContent = text;
+      tr.append(td);
     }
+    return tr;
+  }));
+  document.getElementById('results').hidden = false;
+}
+
+// ---------- Clavier et fenêtre ----------
+function keyPressed() {
+  if (key === 'c' || key === 'C') camera.mode = (camera.mode + 1) % CAMERAS.length;
+  if (key === 'd' || key === 'D') debug = !debug;
+  if (key === 'm' || key === 'M') {
+    const on = engine.setEnabled(!engine.enabled);
+    document.getElementById('sound').checked = on;
   }
-}
-
-function updateStats() {
-  if (!trainer) {
-    for (const id of ['generation', 'alive', 'time', 'lead', 'champion']) $(id).textContent = '—';
-    $('circuit').textContent = home.name;
-    return;
+  if (key === 'r' || key === 'R') {
+    newRace();
+    paused = false;
   }
-  const L = trainer.track.length;
-  $('circuit').textContent = trainer.circuit.name;
-  const lead = Trainer.leader(trainer);
-  $('generation').textContent = trainer.championOnly ? 'champion' : String(trainer.generation);
-  $('alive').textContent = `${Trainer.alive(trainer).length} / ${trainer.cars.length}`;
-  $('time').textContent = `${(trainer.frame / Trainer.FRAMES_PER_SECOND).toFixed(1)} / ${settings.generationTime} s`;
-  $('lead').textContent = lead ? `${(lead.fitness() / L).toFixed(2)} tour` : '—';
-  $('champion').textContent = trainer.champion
-    ? `${trainer.champion.score.toFixed(2)} tours en test (génération ${trainer.champion.generation})` : '—';
-}
-
-// ---------- Réglages ----------
-function formatSetting(name, value) {
-  const text = value.toFixed(Trainer.SETTINGS[name].decimals);
-  return UNITS[name] ? UNITS[name](text) : text;
-}
-
-function bindSettings() {
-  for (const name of Object.keys(Trainer.SETTINGS)) {
-    const input = $(`set-${name}`);
-    const output = $(`${name}-value`);
-    input.value = settings[name];
-    output.value = formatSetting(name, settings[name]);
-    input.addEventListener('input', () => {
-      Trainer.setSetting(settings, name, Number(input.value), trainer);
-      output.value = formatSetting(name, settings[name]);
-      if (Trainer.SETTINGS[name].topology) refreshArchitecture();
-    });
+  if (keyCode === TAB) {
+    const order = Race.standings(race);
+    followed = order[(order.indexOf(followed) + 1) % order.length];
+    return false;
   }
-}
-
-function syncSliders() {
-  for (const name of Object.keys(Trainer.SETTINGS)) {
-    $(`set-${name}`).value = settings[name];
-    $(`${name}-value`).value = formatSetting(name, settings[name]);
+  if (keyCode === ESCAPE) {
+    paused = true;
+    engine.setEnabled(false);
+    document.getElementById('menu').hidden = false;
   }
-}
-
-function refreshArchitecture() {
-  const sizes = Evolution.architecture(settings);
-  $('architecture').textContent = sizes.join(' → ');
-  if (!previewBrain || previewBrain.sizes.join() !== sizes.join()) previewBrain = new NeuralNetwork(sizes);
-  drawNetwork();
-}
-
-// ---------- Commandes ----------
-function bindControls() {
-  $('run').addEventListener('click', () => {
-    if (!trainer) {
-      trainer = Trainer.create(settings);
-      Trainer.setRandomTracks(trainer, randomTracks);
-      running = true;
-      setStatus('');
-    } else {
-      running = !running;
-    }
-    refreshControls();
-  });
-  $('reset').addEventListener('click', () => {
-    if (trainer && !confirm('Effacer cet entraînement ? Pensez à le sauvegarder avant.')) return;
-    trainer = null;
-    running = false;
-    $('champion-only').checked = false;
-    refreshArchitecture();
-    refreshControls();
-    drawChart();
-  });
-  $('sim-speed').addEventListener('input', event => {
-    simSpeed = Number(event.target.value);
-    $('sim-speed-value').value = `×${simSpeed}`;
-  });
-  $('all-rays').addEventListener('change', event => { allRays = event.target.checked; });
-  $('random-tracks').addEventListener('change', event => {
-    randomTracks = event.target.checked;
-    if (trainer) Trainer.setRandomTracks(trainer, randomTracks);
-  });
-  $('champion-only').addEventListener('change', event => {
-    if (!Trainer.setChampionOnly(trainer, event.target.checked)) {
-      event.target.checked = false;
-      setStatus('Pas encore de champion : attendez la fin de la première génération.', true);
-    }
-  });
-  $('save').addEventListener('click', saveTraining);
-  $('load').addEventListener('click', loadTraining);
-}
-
-// Boutons et verrouillage de l'architecture selon l'état : réglage, entraînement, arrêt.
-function refreshControls() {
-  $('run').textContent = !trainer ? '▶ Démarrer l\'entraînement' : running ? '⏸ Arrêter' : '▶ Reprendre';
-  $('reset').disabled = !trainer;
-  $('save').disabled = !trainer;
-  $('champion-only').disabled = !trainer;
-  for (const input of document.querySelectorAll('[data-topology]')) input.disabled = Boolean(trainer);
-  $('lock-note').hidden = !trainer;
-}
-
-function setStatus(text, error = false) {
-  const status = $('save-status');
-  status.textContent = text;
-  status.classList.toggle('error', error);
-}
-
-async function saveTraining() {
-  try {
-    const name = $('save-name').value;
-    const result = await SaveFile.save(Trainer.serialize(trainer, name.trim() || 'entrainement'), name);
-    if (result) setStatus(`Enregistré : ${result.name} (${result.where}), génération ${trainer.generation}.`);
-  } catch (error) {
-    setStatus(`Échec de l'enregistrement : ${error.message}`, true);
-  }
-}
-
-async function loadTraining() {
-  if (trainer && !confirm('Remplacer l\'entraînement en cours par une sauvegarde ?')) return;
-  try {
-    const file = await SaveFile.open();
-    if (!file) return;
-    const loaded = Trainer.deserialize(file.data);
-    Object.assign(settings, loaded.settings);
-    trainer = Trainer.create(settings, Math.random, loaded.saved);
-    running = false;
-    randomTracks = trainer.randomTracks;
-    $('random-tracks').checked = randomTracks;
-    $('champion-only').checked = false;
-    $('save-name').value = loaded.name || file.name.replace(/\.json$/i, '');
-    syncSliders();
-    refreshArchitecture();
-    refreshControls();
-    drawChart();
-    setStatus(`Chargé : ${file.name}, génération ${trainer.generation}. Cliquez sur Reprendre.`);
-  } catch (error) {
-    setStatus(`Impossible de charger : ${error.message}`, true);
-  }
+  // Les flèches et Espace ne font pas défiler la page.
+  return ![UP_ARROW, DOWN_ARROW, LEFT_ARROW, RIGHT_ARROW, 32].includes(keyCode);
 }
 
 function windowResized() {
-  const stage = $('stage');
-  resizeCanvas(stage.clientWidth, stage.clientHeight);
+  resizeCanvas(windowWidth, windowHeight);
 }

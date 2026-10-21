@@ -16,25 +16,37 @@ export class Vector {
   setMag(n) { const m = this.mag(); return m ? this.mult(n / m) : this; }
   limit(n) { return this.mag() > n ? this.setMag(n) : this; }
   heading() { return Math.atan2(this.y, this.x); }
+  dist(v) { return Math.hypot(this.x - v.x, this.y - v.y); }
   static sub(a, b) { return new Vector(a.x - b.x, a.y - b.y); }
+  static dist(a, b) { return a.dist(b); }
 }
 
-// Même ordre que les balises <script> de index.html (sans le dessin ni l'interface).
-export const FILES = ['src/core/vehicle.js', 'src/core/track.js', 'src/ai/neuralNetwork.js', 'src/ai/evolution.js',
-  'src/sim/trackSensors.js', 'src/sim/trackGenerator.js', 'src/sim/neuralCar.js', 'src/sim/trainer.js', 'src/app/saveFile.js'];
+const DRAWING = ['push', 'pop', 'fill', 'noFill', 'stroke', 'noStroke', 'strokeWeight', 'circle', 'line',
+  'triangle', 'translate', 'rotate', 'rect'];
 
-// Charge les fichiers du jeu dans un contexte isolé, comme les balises <script> de index.html.
+// Même ordre que les balises <script> de index.html (sans l'interface).
+export const FILES = ['src/core/vehicle.js', 'src/core/track.js', 'src/cars/raceCar.js', 'src/cars/aiCar.js',
+  'src/cars/playerCar.js', 'src/race/smokePuff.js', 'src/ai/neuralNetwork.js', 'src/ai/trackSensors.js',
+  'src/ai/neuralBrains.js', 'src/cars/neuralRaceCar.js', 'src/race/race.js', 'src/cars/gearbox.js',
+  'src/audio/engineSound.js', 'src/render/trackPainter.js'];
+
 export function load(files = FILES) {
-  const context = vm.createContext({ createVector: (x, y) => new Vector(x, y), p5: { Vector }, width: 1200, height: 800 });
+  const draws = [];
+  const stubs = Object.fromEntries(DRAWING.map(name => [name, (...args) => draws.push([name, ...args])]));
+  const context = vm.createContext({ createVector: (x, y) => new Vector(x, y), p5: { Vector }, width: 1200, height: 800, ...stubs });
+  const names = [];
   for (const file of files) {
     vm.runInContext(readFileSync(new URL(`../${file}`, import.meta.url), 'utf8'), context, { filename: file });
   }
-  const names = ['Vehicle', 'Track', 'NeuralNetwork', 'TrackSensors', 'TrackGenerator', 'NeuralCar', 'Evolution', 'Trainer', 'SaveFile']
+  const exported = ['Vehicle', 'Track', 'RaceCar', 'AICar', 'PlayerCar', 'SmokePuff', 'Race', 'Gearbox', 'EngineSound', 'TrackPainter',
+    'NeuralNetwork', 'TrackSensors', 'NeuralBrains', 'NeuralRaceCar']
     .filter(name => vm.runInContext(`typeof ${name} !== 'undefined'`, context));
-  return { context, ...vm.runInContext(`({ ${names.join(', ')} })`, context) };
+  names.push(...exported);
+  return { draws, context, ...vm.runInContext(`({ ${names.join(', ')} })`, context) };
 }
 
 export function seededRng(seed = 42) {
-  let s = seed >>> 0 || 1;
-  return () => (s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296;
+  return () => (seed = (seed * 16807) % 2147483647) / 2147483647;
 }
+
+export const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;

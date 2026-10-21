@@ -1,71 +1,104 @@
-# Darwin GP
+# Darwin GP — IA réactive
 
-Racing cars that teach themselves to drive. Each car has a small neural network for a brain and sees the track through detection rays. A genetic algorithm breeds the best drivers of each generation into the next one. Every generation races on a new, randomly generated track, so the cars learn to *drive* rather than memorise one circuit.
+Une course de monoplaces vue de dessus en p5.js, sans dépendance à installer, sur le circuit « Prairie GP ». Les pilotes IA sont construits avec les *steering behaviors* de Craig W. Reynolds (« Steering Behaviors for Autonomous Characters », GDC 1999).
 
-Steering follows Craig Reynolds' model (*Steering Behaviors for Autonomous Characters*): the network chooses a desired velocity, and the steering force is `desired − velocity`, capped at `maxForce`. Built with [p5.js](https://p5js.org/) and no other dependency.
+## Lancer
 
-## Run it
+Ouvre `index.html` dans un navigateur, ou sers le dossier (`python -m http.server 8000`, puis http://localhost:8000).
 
-Double-click `index.html`. No server and no install needed. Chrome or Edge are recommended for saving trainings to a folder.
+Au menu, choisis :
+- **Piloter contre l'IA** ou **Regarder la course** ;
+- le nombre de tours et d'adversaires ;
+- le son du moteur.
 
-## What you can tune
+Puis clique sur **Départ**.
 
-The sliders on the left (UI in French):
+| Touche | Effet |
+| --- | --- |
+| Flèches / ZQSD | piloter (accélérer, freiner, tourner) |
+| C | caméra : proche, large, circuit entier |
+| D | debug IA : point visé, voie, dangers, force de steering, vitesse visée et profil de vitesse |
+| Tab | changer de voiture suivie (ou clic dans le classement) |
+| M | son du moteur |
+| R | recommencer |
+| Échap | menu |
 
-- **Rayons de détection** (detection rays): how many (1–15), the opening angle (10°–360°) and their length (50–600 px). A car on the start line previews them live.
-- **Voiture**: `maxSpeed` and `maxForce`.
-- **Réseau de neurones**: hidden layers (1–4) and neurons per layer (2–32), shown as a live diagram of the leading car's network.
-- **Évolution**: population (10–200), mutation rate and maximum time per generation.
+## L'IA : les trois couches de Reynolds
 
-The ray count and network size are locked once training starts, because they change the network's shape. *Réinitialiser* unlocks them.
+1. **Sélection de l'action** (`aiCar.js`, `perceive` / `decide`) : chaque pilote perçoit la voiture devant et derrière lui sur sa voie, ainsi que les voitures arrêtées ou en tête-à-queue. Il choisit ensuite un mode :
+   - course ;
+   - aspiration ;
+   - dépassement : changement de voie, seulement s'il est nettement plus rapide, selon son agressivité ;
+   - défense : il se place à l'intérieur du prochain virage ;
+   - évite : il passe de l'autre côté d'un accident ;
+   - relance après un tête-à-queue.
+2. **Steering** : la somme pondérée de `Vehicle`, faite de :
+   - *path following* sur la voie choisie, l'une des cinq voies parallèles à la trajectoire de course ;
+   - *separation* avec les voitures proches ;
+   - *obstacle avoidance* à trois points de détection ;
+   - un peu de *wander*, pour l'imprécision humaine ;
+   - un retour sur la piste.
 
-## How a generation works
+   La vitesse visée vient d'un **profil de vitesse** (`track.js`) : `v = √(adhérence / courbure)` dans les virages, puis une passe arrière qui crée les zones de freinage. Chaque pilote a son propre profil, qui dépend de son habileté. Il commet parfois des erreurs, comme un freinage trop tardif.
+3. **Locomotion** (`raceCar.js`) : volant, accélérateur et frein deviennent des forces (`applyForce`) que `Vehicle.update` intègre. Le modèle couvre :
+   - un moteur limité en puissance et la traînée aérodynamique ;
+   - une adhérence latérale bornée ;
+   - un braquage limité par la vitesse, d'où le sous-virage ;
+   - le tête-à-queue ;
+   - l'herbe et le gravier ;
+   - l'aspiration.
 
-1. **Generation 1 runs behind the scenes.** Its brains are random and almost every car crashes within seconds, so it is simulated off-screen at full speed. The visible race starts at generation 2.
-2. Cars are eliminated when they leave the track, stall or turn back. There are no collisions between cars.
-3. **Fitness** is the distance covered along the track.
-4. The top 5% are copied unchanged (gold cars). The rest are children of two tournament-selected parents, with uniform crossover and Gaussian mutation.
-5. **A new random track** is drawn for each generation. It is rejected if it has hairpins tighter than the original circuit, sections too close together, or a start line in a corner. The *Nouveau circuit à chaque génération* checkbox turns this off.
-6. **The champion** is chosen on 4 fixed test tracks that are never used for training. The best car of each generation drives them alone, and the champion is the car with the best average. This rewards cars that generalise, not cars that got an easy track. The green line on the chart shows this test score.
+Le joueur (`playerCar.js`) utilise exactement la même locomotion ; seules les commandes viennent du clavier.
 
-*Champion seul* replays only the champion, on a fresh track each time.
+## IA génétiques (réseaux de neurones)
 
-## Save and load
+Au menu, « IA génétiques » donne à certains adversaires le cerveau d'une **génération** d'un simulateur d'entraînement génétique (réseaux de neurones sélectionnés génération après génération). Les autres gardent le steering de Reynolds : au moins deux, toujours.
 
-*Arrêter* pauses training. Type a name and click *Sauvegarder*: in Chrome or Edge a *Save as* window lets you pick the folder and edit the name, and other browsers download the file. A save holds:
+- **Perception** : des rayons vers les bords de la piste, comme à l'entraînement, plus la vitesse.
+- **Décision** : le réseau donne un virage (jusqu'à ±90°) et une vitesse désirée.
+- **Locomotion** : la même que tout le monde (`RaceCar`).
+- **Hors piste ou à contresens** : le réseau ne voit plus rien d'utile, alors la voiture rejoint la piste (mode « retour piste »), puis le réseau reprend la main.
 
-- the settings and generation number;
-- the history and the champion;
-- the whole population and the current track.
+Avec D (debug), on voit les rayons de chaque pilote génétique (vert = loin du bord, rouge = proche), le cap qu'il veut prendre et ses deux sorties.
 
-*Charger…* restores all of it, and *Reprendre* continues from the same generation. Saves from the project's earlier name (*Neuro Racing*) still load.
+**D'où viennent les générations** (`src/ai/neuralBrains.js`, généré par `tools/buildBrains.mjs`) :
 
-## Project layout
+- Les réseaux de la sauvegarde `entrainement-5 → 8 → 8 → 2` (génération 329) ont appris sur la voiture simple du simulateur d'entraînement. Elle peut tourner avec une force six fois plus grande que l'adhérence d'une monoplace. Telles quelles, ces générations prennent tous les virages trop vite et sortent de la piste.
+- La population a donc **continué d'évoluer**, avec le même algorithme génétique, dans la physique de la course. Le circuit est Prairie GP, et sortir de la piste élimine. Les générations suivantes apprennent à freiner.
+- Le menu propose la génération 329 non adaptée, puis plusieurs générations de l'adaptation, jusqu'à la dernière. Il n'y a plus de génération 1 (réseau au hasard) : elle sortait de la piste dès le départ et n'était pas un adversaire.
 
+Pour refaire les cerveaux (Node 18+, quelques minutes) :
+
+```sh
+node tools/buildBrains.mjs --save "<chemin>/entrainement-5 → 8 → 8 → 2.json"
 ```
-index.html, style.css      page and panel
-lib/p5.min.js              p5.js
-src/core/                  vehicle.js (Reynolds vehicle), track.js (track geometry)
-src/ai/                    neuralNetwork.js (MLP), evolution.js (genetic algorithm)
-src/sim/                   trackSensors.js (rays), trackGenerator.js (random tracks),
-                           neuralCar.js (the car), trainer.js (generations, champion, saves)
-src/render/                trackPainter.js, carPainter.js (drawing only)
-src/app/                   sketch.js (p5 loop, UI), saveFile.js (save/load files)
-tests/                     Node test suite
-```
+
+Le projet est autonome, outils compris : l'algorithme génétique est dans `src/ai/evolution.js`. Seule la sauvegarde d'entraînement (le fichier `.json`) vient de l'extérieur.
+
+## Fichiers
+
+| Dossier | Fichiers | Rôle |
+| --- | --- | --- |
+| `src/core/` | `vehicle.js`, `track.js` | véhicule de base de Reynolds (seek, flee, pursue, wander, follow, separate, avoid, somme pondérée) ; géométrie du circuit, trajectoire de course, profil de vitesse |
+| `src/cars/` | `raceCar.js`, `aiCar.js`, `playerCar.js`, `neuralRaceCar.js`, `gearbox.js` | monoplace et ses pilotes (une classe par fichier, toutes des `Vehicle`), boîte de vitesses |
+| `src/ai/` | `neuralNetwork.js`, `trackSensors.js`, `neuralBrains.js`, `evolution.js` | réseau de neurones, rayons de détection, cerveaux par génération, algorithme génétique (outils) |
+| `src/race/` | `race.js`, `smokePuff.js` | grille, feux, aspiration, surfaces, contacts, tours, classement, fumée |
+| `src/render/` | `trackPainter.js`, `carPainter.js` | dessin du circuit et des voitures |
+| `src/audio/` | `engineSound.js` | son du moteur (Web Audio) |
+| `src/app/` | `sketch.js` | boucle p5, caméra, interface |
+| `tools/` | `buildBrains.mjs`, `raceTrainer.mjs` | évolution des cerveaux dans la physique de la course |
+| `lib/` | `p5.min.js` | p5.js |
 
 ## Tests
 
-With Node.js 18 or later:
-
 ```sh
-npm test
+npm test            # ou : node --test tests/
 ```
 
-The tests cover:
-- the network (maths, copy, crossover, mutation, JSON);
-- the rays, checked against a brute-force test of every track edge;
-- random tracks (reproducible seeds, rejection rules) and the car (steering, elimination);
-- the genetic algorithm, training and the off-screen generation 1;
-- save and resume, including old saves;
-- learning itself: within 12 generations the best car drives clearly farther.
+Les tests couvrent :
+- la géométrie du circuit et le profil de vitesse ;
+- la physique de la voiture (accélération, freinage, sous-virage, tête-à-queue, surfaces) ;
+- la perception et les décisions de l'IA ;
+- la grille et les feux, l'aspiration et les contacts ;
+- une course complète simulée avec un aléatoire fixé ;
+- la boîte de vitesses et le son.
