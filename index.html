@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Darwin GP — l'évolution au volant</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="lib/p5.min.js"></script>
+    <!-- Cœur : véhicule de Reynolds et géométrie du circuit -->
+    <script src="src/core/vehicle.js"></script>
+    <script src="src/core/track.js"></script>
+    <!-- IA : réseau de neurones et algorithme génétique -->
+    <script src="src/ai/neuralNetwork.js"></script>
+    <script src="src/ai/evolution.js"></script>
+    <!-- Simulation : rayons, circuits aléatoires, voitures, entraînement -->
+    <script src="src/sim/trackSensors.js"></script>
+    <script src="src/sim/trackGenerator.js"></script>
+    <script src="src/sim/neuralCar.js"></script>
+    <script src="src/sim/trainer.js"></script>
+    <!-- Dessin et application -->
+    <script src="src/render/trackPainter.js"></script>
+    <script src="src/render/carPainter.js"></script>
+    <script src="src/app/saveFile.js"></script>
+    <script src="src/app/sketch.js"></script>
+  </head>
+  <body>
+    <aside id="panel">
+      <header>
+        <h1>Darwin <span>GP</span></h1>
+        <p class="lead">Réseau de neurones + algorithme génétique : chaque génération de voitures apprend à faire le tour du circuit.</p>
+      </header>
+
+      <section class="group">
+        <h2>Rayons de détection</h2>
+        <div class="row">
+          <label for="set-rays">Nombre</label>
+          <input id="set-rays" type="range" min="1" max="15" step="1" value="7" data-topology>
+          <output id="rays-value">7</output>
+        </div>
+        <div class="row">
+          <label for="set-spread">Ouverture</label>
+          <input id="set-spread" type="range" min="10" max="360" step="5" value="180">
+          <output id="spread-value">180°</output>
+        </div>
+        <div class="row">
+          <label for="set-rayLength">Longueur</label>
+          <input id="set-rayLength" type="range" min="50" max="600" step="10" value="250">
+          <output id="rayLength-value">250 px</output>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>Voiture</h2>
+        <div class="row">
+          <label for="set-maxSpeed">Vitesse max</label>
+          <input id="set-maxSpeed" type="range" min="1" max="15" step="0.5" value="10">
+          <output id="maxSpeed-value">10.0</output>
+        </div>
+        <div class="row">
+          <label for="set-maxForce">Force max</label>
+          <input id="set-maxForce" type="range" min="0.05" max="1" step="0.05" value="0.2">
+          <output id="maxForce-value">0.20</output>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>Réseau de neurones</h2>
+        <div class="row">
+          <label for="set-hiddenLayers">Couches cachées</label>
+          <input id="set-hiddenLayers" type="range" min="1" max="4" step="1" value="1" data-topology>
+          <output id="hiddenLayers-value">1</output>
+        </div>
+        <div class="row">
+          <label for="set-hiddenSize">Neurones / couche</label>
+          <input id="set-hiddenSize" type="range" min="2" max="32" step="1" value="8" data-topology>
+          <output id="hiddenSize-value">8</output>
+        </div>
+        <p class="note"><span id="architecture">8 → 8 → 2</span> <span id="lock-note" hidden>· verrouillé pendant l'entraînement</span></p>
+        <canvas id="network" width="600" height="300" aria-label="Schéma du réseau de neurones"></canvas>
+      </section>
+
+      <section class="group">
+        <h2>Évolution</h2>
+        <div class="row">
+          <label for="set-population">Voitures</label>
+          <input id="set-population" type="range" min="10" max="200" step="10" value="50">
+          <output id="population-value">50</output>
+        </div>
+        <div class="row">
+          <label for="set-mutationRate">Mutation</label>
+          <input id="set-mutationRate" type="range" min="0" max="0.5" step="0.01" value="0.1">
+          <output id="mutationRate-value">0.10</output>
+        </div>
+        <div class="row">
+          <label for="set-generationTime">Durée max</label>
+          <input id="set-generationTime" type="range" min="10" max="120" step="5" value="45">
+          <output id="generationTime-value">45 s</output>
+        </div>
+      </section>
+
+      <section class="group">
+        <div class="buttons">
+          <button id="run" type="button" class="primary">▶ Démarrer l'entraînement</button>
+          <button id="reset" type="button" disabled>Réinitialiser</button>
+        </div>
+        <div class="row">
+          <label for="sim-speed">Vitesse simu</label>
+          <input id="sim-speed" type="range" min="1" max="30" step="1" value="1">
+          <output id="sim-speed-value">×1</output>
+        </div>
+        <label class="check"><input id="random-tracks" type="checkbox" checked> Nouveau circuit à chaque génération</label>
+        <label class="check"><input id="all-rays" type="checkbox"> Rayons de toutes les voitures</label>
+        <label class="check"><input id="champion-only" type="checkbox" disabled> Champion seul (pas d'évolution)</label>
+      </section>
+
+      <section class="group stats">
+        <div class="stat"><span class="label">Génération</span><strong id="generation">—</strong></div>
+        <div class="stat"><span class="label">En course</span><strong id="alive">—</strong></div>
+        <div class="stat"><span class="label">Temps</span><strong id="time">—</strong></div>
+        <div class="stat"><span class="label">Tête</span><strong id="lead">—</strong></div>
+        <div class="stat wide"><span class="label">Circuit</span><strong id="circuit">Prairie GP</strong></div>
+        <div class="stat wide"><span class="label">Champion</span><strong id="champion">—</strong></div>
+        <canvas id="chart" width="600" height="220" aria-label="Meilleur score et score moyen par génération"></canvas>
+        <p class="note legend"><span class="key best"></span>meilleure <span class="key mean"></span>moyenne <span class="key test"></span>test (en tours)</p>
+        <p class="note">Champion : la voiture qui roule le plus loin, en moyenne, sur 4 circuits de test jamais utilisés pour l'entraînement.</p>
+      </section>
+
+      <section class="group">
+        <h2>Sauvegarde</h2>
+        <div class="row name">
+          <label for="save-name">Nom</label>
+          <input id="save-name" type="text" value="entrainement-1" spellcheck="false">
+        </div>
+        <div class="buttons">
+          <button id="save" type="button" disabled>💾 Sauvegarder</button>
+          <button id="load" type="button">📂 Charger…</button>
+        </div>
+        <p id="save-status" class="note" aria-live="polite"></p>
+      </section>
+    </aside>
+    <main id="stage" aria-label="Circuit vu en entier"></main>
+  </body>
+</html>
