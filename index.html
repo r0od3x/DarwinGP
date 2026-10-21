@@ -22,6 +22,11 @@
     <script src="src/render/trackPainter.js"></script>
     <script src="src/render/carPainter.js"></script>
     <script src="src/app/sketch.js"></script>
+    <script>
+      // Outils de bande-annonce (index.html?trailer=…) : chargés seulement avec ce paramètre,
+      // sinon le jeu est strictement le même.
+      if (new URLSearchParams(location.search).has('trailer')) document.write('<script src="trailer/stage.js"><\/script>');
+    </script>
   </head>
   <body>
     <main id="stage" aria-label="Course automobile"></main>

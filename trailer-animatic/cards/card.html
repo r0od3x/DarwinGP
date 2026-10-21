@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>card</title>
+  <!-- Cartons de l'animatique (rendus en PNG 1920 × 1080 par build.mjs) :
+       card.html?kind=black | title&tagline=… | cta&line=…&link=…
+       Le tracé du circuit vient du vrai track.js du jeu. -->
+  <script src="../../src/core/track.js"></script>
+  <style>
+    html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #07090c; }
+    body {
+      font-family: "Segoe UI Black", "Segoe UI", system-ui, sans-serif; color: #f4f6f8;
+      background: radial-gradient(ellipse at 50% 55%, #141a22 0%, #07090c 70%);
+    }
+    svg { position: absolute; inset: 0; }
+    .stripes { position: absolute; inset: 0; opacity: 0.05;
+      background: repeating-linear-gradient(115deg, #fff 0 2px, transparent 2px 26px); }
+    .center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+    .logo { font-size: 230px; letter-spacing: 0.02em; line-height: 1; font-style: italic; text-shadow: 0 12px 40px rgba(0,0,0,0.6); }
+    .logo span { color: #ffd600; }
+    .bar { width: 760px; height: 10px; margin: 26px 0 34px; background: linear-gradient(90deg, transparent, #ffd600 20%, #ff9800 80%, transparent); }
+    .tagline { font-family: "Segoe UI Semibold", "Segoe UI", sans-serif; font-weight: 600; font-size: 54px; letter-spacing: 0.04em; color: #e9edf2; }
+    .cta { font-size: 96px; font-style: italic; }
+    .link { margin-top: 44px; font-family: Consolas, "Segoe UI", monospace; font-size: 46px; font-weight: 700;
+      padding: 18px 40px; border: 3px solid #ffd600; border-radius: 14px; color: #ffd600; background: rgba(255, 214, 0, 0.06); }
+    .small { position: absolute; bottom: 70px; width: 100%; text-align: center; font-family: "Segoe UI", sans-serif; font-weight: 600;
+      font-size: 30px; letter-spacing: 0.3em; text-transform: uppercase; color: rgba(244, 246, 248, 0.45); }
+  </style>
+</head>
+<body>
+  <div class="stripes"></div>
+  <svg id="circuit" viewBox="0 0 1920 1080"></svg>
+  <div class="center" id="content"></div>
+  <script>
+    const q = new URLSearchParams(location.search);
+    const kind = q.get('kind') ?? 'black';
+    // Tracé du circuit, centré, plus ou moins visible selon le carton.
+    const track = Track.build();
+    const b = track.bounds;
+    const k = Math.min(1500 / b.w, 900 / b.h);
+    const pts = track.points.map(p => `${(960 + (p.x - b.x - b.w / 2) * k).toFixed(1)},${(560 + (p.y - b.y - b.h / 2) * k).toFixed(1)}`).join(' ');
+    const alpha = { black: 0.07, title: 0.16, cta: 0.1 }[kind] ?? 0.08;
+    document.getElementById('circuit').innerHTML =
+      `<polygon points="${pts}" fill="none" stroke="rgba(255,255,255,${alpha})" stroke-width="${track.width * k}" stroke-linejoin="round"/>`
+      + `<polygon points="${pts}" fill="none" stroke="rgba(255,214,0,${alpha * 1.6})" stroke-width="3" stroke-linejoin="round"/>`;
+    const content = document.getElementById('content');
+    if (kind === 'title') {
+      content.innerHTML = `<div class="logo">DARWIN <span>GP</span></div><div class="bar"></div><div class="tagline"></div>`;
+      content.querySelector('.tagline').textContent = q.get('tagline') ?? '';
+    } else if (kind === 'cta') {
+      content.innerHTML = `<div class="logo" style="font-size:120px">DARWIN <span>GP</span></div><div class="bar"></div>`
+        + `<div class="cta"></div><div class="link"></div>`;
+      content.querySelector('.cta').textContent = q.get('line') ?? '';
+      content.querySelector('.link').textContent = q.get('link') ?? '';
+      document.body.insertAdjacentHTML('beforeend', '<div class="small">Prairie GP · IA réactives et génétiques</div>');
+    }
+    document.title = 'trailer:ready';
+  </script>
+</body>
+</html>

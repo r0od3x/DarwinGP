@@ -2,3 +2,8 @@ node_modules/
 .DS_Store
 Thumbs.db
 *.log
+# Fichiers de travail de l'animatique (clips, audio, listes)
+trailer-animatic/.build/
+trailer-animatic/clips/
+trailer-animatic/frames/
+trailer-animatic/*.mp4
