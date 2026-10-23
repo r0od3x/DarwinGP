@@ -14,11 +14,19 @@ const MIN_STEERING = 2;
 let smokeSprite = null;
 let dirtSprite = null;
 let lastFeedFrame = -1;
+// La course avance à 60 pas par seconde quel que soit l'écran : les images perdues sont
+// rattrapées (au plus MAX_STEPS pas par image), et un écran à 120 / 144 Hz n'accélère pas le jeu.
+const STEP_MS = 1000 / 60;
+const MAX_STEPS = 4;
+let stepClock = 0;
 // Son du moteur de la voiture suivie (activé au menu ou avec M).
 const engine = EngineSound.create();
 
 function setup() {
   const canvas = createCanvas(windowWidth, windowHeight);
+  // Une image par pixel CSS : sur un écran haute densité (×1,5, ×2), dessiner 2 à 4 fois plus
+  // de pixels fait tomber la fluidité sans que la différence se voie en jeu.
+  pixelDensity(1);
   canvas.parent('stage');
   smokeSprite = puffSprite('230, 230, 230');
   dirtSprite = puffSprite('170, 145, 95');
@@ -110,14 +118,28 @@ function newRace() {
 }
 
 // ---------- Boucle ----------
+// Nombre de pas de simulation dus depuis l'image précédente. Un écart de moins d'une ms avec un
+// nombre entier de pas (60 Hz irrégulier) compte pour ce nombre, sinon on alternerait 0 et 2 pas.
+function stepsDue() {
+  let dt = deltaTime;
+  const k = Math.round(dt / STEP_MS);
+  if (k >= 1 && Math.abs(dt - k * STEP_MS) < 1) dt = k * STEP_MS;
+  stepClock = Math.min(stepClock + dt, STEP_MS * MAX_STEPS);
+  const steps = Math.floor(stepClock / STEP_MS + 1e-6);
+  stepClock = Math.max(0, stepClock - steps * STEP_MS);
+  return steps;
+}
+
 function draw() {
-  if (!paused) {
-    if (race.player) readKeys(race.player);
-    Race.step(race);
-    TrackPainter.addSkids(baked, race.skids);
-    if (race.phase === 'finished' && document.getElementById('results').hidden) showResults();
+  for (let i = stepsDue(); i > 0; i--) {
+    if (!paused) {
+      if (race.player) readKeys(race.player);
+      Race.step(race);
+      TrackPainter.addSkids(baked, race.skids);
+      if (race.phase === 'finished' && document.getElementById('results').hidden) showResults();
+    }
+    updateCamera();
   }
-  updateCamera();
   render();
   const gearbox = Gearbox.state(followed.localVelocity().along, followed.topSpeed);
   engine.update(paused ? Gearbox.IDLE : gearbox.rpm, paused ? 0 : followed.throttle);
